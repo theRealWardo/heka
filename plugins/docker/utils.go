@@ -1,4 +1,5 @@
 package docker
+
 // Originally based on Logspout (https://github.com/progrium/logspout)
 // Copyright (C) 2014 Jeff Lindsay
 //
@@ -24,22 +25,21 @@ package docker
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-import(
+import (
+	"github.com/fsouza/go-dockerclient"
+	. "github.com/mozilla-services/heka/pipeline"
+	"path/filepath"
 	"strings"
 	"time"
-	"path/filepath"
-	. "github.com/mozilla-services/heka/pipeline"
-	"github.com/fsouza/go-dockerclient"
 )
-
 
 const (
 	SLEEP_BETWEEN_RECONNECT = 500 * time.Millisecond
-	EVENT_FORMAT_STRING = "Event.ID : %s , event.Type : %s , event.Name : %s"
+	EVENT_FORMAT_STRING     = "Event.ID : %s , event.Type : %s , event.Name : %s"
 )
 
 // Return a properly configured Docker client
-func newDockerClient(certPath string, endpoint string) (DockerClient, error) {
+func NewDockerClient(certPath string, endpoint string) (DockerClient, error) {
 	var client DockerClient
 	var err error
 
@@ -54,7 +54,6 @@ func newDockerClient(certPath string, endpoint string) (DockerClient, error) {
 
 	return client, err
 }
-
 
 // Handler to wrap functions with retry logic
 func withRetries(doWork func() error) error {
@@ -94,7 +93,7 @@ func extractFields(id string, client DockerClient, fieldsFromLabels []string, fi
 	name := container.Name[1:] // Strip the leading slas
 	image := container.Config.Image
 
-	fields := getEnvVars(container, append(fieldsFromEnv, nameFromEnv))
+	fields := GetEnvVars(container, append(fieldsFromEnv, nameFromEnv))
 	if nameFromEnv != "" {
 		if alt_name, ok := fields[nameFromEnv]; ok && alt_name != "" {
 			name = alt_name
@@ -116,7 +115,7 @@ func extractFields(id string, client DockerClient, fieldsFromLabels []string, fi
 }
 
 // Process the env vars and capture the ones we want
-func getEnvVars(container *docker.Container, keys []string) map[string]string {
+func GetEnvVars(container *docker.Container, keys []string) map[string]string {
 	vars := make(map[string]string)
 	for _, value := range container.Config.Env {
 		valueParts := strings.SplitN(value, "=", 2)

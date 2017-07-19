@@ -27,12 +27,15 @@ import (
 	"time"
 
 	"github.com/cactus/gostrftime"
+	dc "github.com/fsouza/go-dockerclient"
 	"github.com/mozilla-services/heka/message"
 	. "github.com/mozilla-services/heka/pipeline"
+	"github.com/mozilla-services/heka/plugins/docker"
 )
 
 const lowerhex = "0123456789abcdef"
 const NEWLINE byte = 10
+const dockerPrefix = "docker/"
 
 func writeUTF16Escape(b *bytes.Buffer, c rune) {
 	b.WriteString(`\u`)
@@ -94,11 +97,11 @@ func writeField(first bool, b *bytes.Buffer, f *message.Field, raw bool, replace
 		b.WriteString(`,`)
 	}
 
-        if replaceDotsWith != "." {
-	    writeQuotedString(b, strings.Replace(f.GetName(), ".", replaceDotsWith, -1))
-        } else {
-	    writeQuotedString(b, f.GetName())
-        }
+	if replaceDotsWith != "." {
+		writeQuotedString(b, strings.Replace(f.GetName(), ".", replaceDotsWith, -1))
+	} else {
+		writeQuotedString(b, f.GetName())
+	}
 
 	b.WriteString(`:`)
 
@@ -244,7 +247,7 @@ type ESJsonEncoder struct {
 	fieldMappings     *ESFieldMappings
 	dynamicFields     []string
 	usesDynamicFields bool
-    	replaceDotsWith   string
+	replaceDotsWith   string
 }
 
 // Heka fields to ElasticSearch mapping
@@ -282,8 +285,8 @@ type ESJsonEncoderConfig struct {
 	// Dynamic fields to be included. Non-empty value raises an error if
 	// 'DynamicFields' is not in Fields []string property.
 	DynamicFields []string `toml:"dynamic_fields"`
-   	// Replace dot (".") characters in JSON field names with a substitute string.
-   	ReplaceDotsWith string `toml:"replace_dots_with"`
+	// Replace dot (".") characters in JSON field names with a substitute string.
+	ReplaceDotsWith string `toml:"replace_dots_with"`
 }
 
 func (e *ESJsonEncoder) ConfigStruct() interface{} {
@@ -304,7 +307,7 @@ func (e *ESJsonEncoder) ConfigStruct() interface{} {
 			Pid:        "Pid",
 			Hostname:   "Hostname",
 		},
-		ReplaceDotsWith:      ".",
+		ReplaceDotsWith: ".",
 	}
 
 	config.Fields = fieldChoices[:]
@@ -317,7 +320,7 @@ func (e *ESJsonEncoder) Init(config interface{}) (err error) {
 	e.fields = conf.Fields
 	e.timestampFormat = conf.Timestamp
 	e.rawBytesFields = conf.RawBytesFields
-   	e.replaceDotsWith = conf.ReplaceDotsWith
+	e.replaceDotsWith = conf.ReplaceDotsWith
 	e.coord = &ElasticSearchCoordinates{
 		Index:                conf.Index,
 		Type:                 conf.TypeName,
@@ -427,7 +430,7 @@ type ESLogstashV0Encoder struct {
 	coord           *ElasticSearchCoordinates
 	dynamicFields   []string
 	useMessageType  bool
-    	replaceDotsWith string
+	replaceDotsWith string
 }
 
 type ESLogstashV0EncoderConfig struct {
@@ -453,7 +456,7 @@ type ESLogstashV0EncoderConfig struct {
 	// 'DynamicFields' is not in Fields []string property.
 	DynamicFields []string `toml:"dynamic_fields"`
 	// Replace dot (".") characters in JSON field names with a substitute string.
-   	ReplaceDotsWith string `toml:"replace_dots_with"`
+	ReplaceDotsWith string `toml:"replace_dots_with"`
 }
 
 func (e *ESLogstashV0Encoder) ConfigStruct() interface{} {
@@ -479,7 +482,7 @@ func (e *ESLogstashV0Encoder) Init(config interface{}) (err error) {
 	e.fields = conf.Fields
 	e.timestampFormat = conf.Timestamp
 	e.useMessageType = conf.UseMessageType
-   	e.replaceDotsWith = conf.ReplaceDotsWith
+	e.replaceDotsWith = conf.ReplaceDotsWith
 	e.coord = &ElasticSearchCoordinates{
 		Index:                conf.Index,
 		Type:                 conf.TypeName,
@@ -579,7 +582,243 @@ func (e *ESLogstashV0Encoder) Encode(pack *PipelinePack) (output []byte, err err
 							}
 						}
 					}
-					writeField(firstfield, &buf, field, raw,  e.replaceDotsWith)
+					writeField(firstfield, &buf, field, raw, e.replaceDotsWith)
+					firstfield = false
+				}
+			}
+			buf.WriteString(`}`) // end of fields
+		default:
+			err = fmt.Errorf("Unable to find field: %s", f)
+			return
+		}
+		first = false
+	}
+	buf.WriteString(`}`)
+	buf.WriteByte(NEWLINE)
+	return buf.Bytes(), err
+}
+
+type ESLogstashDockerEncoder struct {
+	// Field names to include in ElasticSearch document for "clean" format.
+	fields           []string
+	timestampFormat  string
+	rawBytesFields   []string
+	coord            *ElasticSearchCoordinates
+	dynamicFields    []string
+	useMessageType   bool
+	replaceDotsWith  string
+	dockerClient     docker.DockerClient
+	containers       map[string]*dc.Container
+	nameFromEnv      string
+	fieldsFromEnv    []string
+	fieldsFromLabels []string
+}
+
+type ESLogstashDockerEncoderConfig struct {
+	// Name of the index in which the messages will be indexed. Defaults
+	// to "logstash-%{%Y.%m.%d}".
+	Index string
+	// Name of the document type of the messages. Defaults to "message".
+	TypeName string `toml:"type_name"`
+	// Should the @type field match the index _type. Defaults to false.
+	UseMessageType bool `toml:"use_message_type"`
+	// Field names to include in ElasticSearch document.
+	Fields []string
+	// Timestamp format. Defaults to "%Y-%m-%dT%H:%M:%S"
+	Timestamp string
+	// When formating the Index use the Timestamp from the Message instead of
+	// time of processing. Defaults to false.
+	ESIndexFromTimestamp bool `toml:"es_index_from_timestamp"`
+	// Document ID to use. Defaults to "".
+	Id string
+	// Fields to which formatting will not be applied.
+	RawBytesFields []string `toml:"raw_bytes_fields"`
+	// Dynamic fields to be included. Non-empty value raises an error if
+	// 'DynamicFields' is not in Fields []string property.
+	DynamicFields []string `toml:"dynamic_fields"`
+	// Replace dot (".") characters in JSON field names with a substitute string.
+	ReplaceDotsWith string `toml:"replace_dots_with"`
+	// Docker specific variables.
+	Endpoint         string   `toml:"endpoint"`
+	CertPath         string   `toml:"cert_path"`
+	NameFromEnv      string   `toml:"name_from_env_var"`
+	FieldsFromEnv    []string `toml:"fields_from_env"`
+	FieldsFromLabels []string `toml:"fields_from_labels"`
+}
+
+func (e *ESLogstashDockerEncoder) ConfigStruct() interface{} {
+
+	config := &ESLogstashDockerEncoderConfig{
+		Index:                "logstash-%{%Y.%m.%d}",
+		TypeName:             "message",
+		Timestamp:            "%Y-%m-%dT%H:%M:%S",
+		UseMessageType:       false,
+		ESIndexFromTimestamp: false,
+		Id:                   "",
+		ReplaceDotsWith:      ".",
+		Endpoint:             "unix:///var/run/docker.sock",
+		CertPath:             "",
+	}
+
+	config.Fields = fieldChoices[:]
+	config.DynamicFields = []string{}
+	return config
+}
+
+func (e *ESLogstashDockerEncoder) Init(config interface{}) (err error) {
+	conf := config.(*ESLogstashDockerEncoderConfig)
+	e.rawBytesFields = conf.RawBytesFields
+	e.fields = conf.Fields
+	e.timestampFormat = conf.Timestamp
+	e.useMessageType = conf.UseMessageType
+	e.replaceDotsWith = conf.ReplaceDotsWith
+	e.coord = &ElasticSearchCoordinates{
+		Index:                conf.Index,
+		Type:                 conf.TypeName,
+		ESIndexFromTimestamp: conf.ESIndexFromTimestamp,
+		Id:                   conf.Id,
+	}
+	e.dynamicFields = conf.DynamicFields
+
+	client, err := docker.NewDockerClient(conf.CertPath, conf.Endpoint)
+	if err != nil {
+		return err
+	}
+	e.dockerClient = client
+	e.containers = make(map[string]*dc.Container)
+
+	e.nameFromEnv = conf.NameFromEnv
+	e.fieldsFromEnv = conf.FieldsFromEnv
+	e.fieldsFromLabels = conf.FieldsFromLabels
+
+	usesDynamicFields := false
+	for i, f := range e.fields {
+		lowF := strings.ToLower(f)
+		// Use of "fields" value is undocumented but left in for b/w compatibility.
+		if lowF == "fields" {
+			e.fields[i] = "dynamicfields"
+			usesDynamicFields = true
+		} else if lowF == "dynamicfields" {
+			usesDynamicFields = true
+		} else if !inFieldChoices(lowF) {
+			msg := "Unsupported value \"%s\" in 'fields' list, must be one of %s"
+			return fmt.Errorf(msg, lowF, strings.Join(fieldChoices, ", "))
+		}
+	}
+
+	if len(e.dynamicFields) > 0 && !usesDynamicFields {
+		msg := "\"DynamicFields\" must be in 'fields' list if using 'dynamic_fields'"
+		return errors.New(msg)
+	}
+	return
+}
+
+func (e *ESLogstashDockerEncoder) Encode(pack *PipelinePack) (output []byte, err error) {
+	m := pack.Message
+	buf := bytes.Buffer{}
+	e.coord.PopulateBuffer(pack.Message, &buf)
+	buf.WriteByte(NEWLINE)
+	buf.WriteString(`{`)
+
+	first := true
+	for _, f := range e.fields {
+		switch strings.ToLower(f) {
+		case "uuid":
+			writeStringField(first, &buf, `@uuid`, m.GetUuidString())
+		case "timestamp":
+			t := time.Unix(0, m.GetTimestamp()).UTC()
+			writeStringField(first, &buf, `@timestamp`, gostrftime.Strftime(e.timestampFormat, t))
+		case "type":
+			if e.useMessageType || len(e.coord.Type) < 1 {
+				writeStringField(first, &buf, `@type`, m.GetType())
+			} else {
+				var interpType string
+				interpType, err = interpolateFlag(e.coord, m, e.coord.Type)
+				if len(interpType) > 0 && err == nil {
+					writeStringField(first, &buf, `@type`, interpType)
+				} else {
+					// fall back on writing the uninterpolated string
+					writeStringField(first, &buf, `@type`, e.coord.Type)
+				}
+			}
+		case "logger":
+			writeStringField(first, &buf, `@logger`, m.GetLogger())
+		case "severity":
+			writeIntField(first, &buf, `@severity`, m.GetSeverity())
+		case "payload":
+			writeStringField(first, &buf, `@message`, m.GetPayload())
+		case "envversion":
+			writeStringField(first, &buf, `@envversion`, m.GetEnvVersion())
+		case "pid":
+			writeIntField(first, &buf, `@pid`, m.GetPid())
+		case "hostname":
+			writeStringField(first, &buf, `@source_host`, m.GetHostname())
+		case "dynamicfields":
+			if !first {
+				buf.WriteString(`,`)
+			}
+			buf.WriteString(`"@fields":{`)
+			firstfield := true
+
+			listsDynamicFields := len(e.dynamicFields) > 0
+			for _, field := range m.Fields {
+				dynamicFieldMatch := false
+				if listsDynamicFields {
+					for _, fieldName := range e.dynamicFields {
+						if *field.Name == fieldName {
+							dynamicFieldMatch = true
+						}
+					}
+				} else {
+					dynamicFieldMatch = true
+				}
+
+				if dynamicFieldMatch {
+					raw := false
+					if len(e.rawBytesFields) > 0 {
+						for _, raw_field_name := range e.rawBytesFields {
+							if *field.Name == raw_field_name {
+								raw = true
+							}
+						}
+					}
+					writeField(firstfield, &buf, field, raw, e.replaceDotsWith)
+					fieldName := *field.Name
+					if fieldName == "programname" {
+						fieldValue := field.GetValueString()[0]
+						if len(fieldValue) > len(dockerPrefix) && fieldValue[:len(dockerPrefix)] == dockerPrefix {
+							// This is a Docker container write the container ID.
+							containerId := fieldValue[len(dockerPrefix):]
+							container, ok := e.containers[containerId]
+							if !ok {
+								container, err = e.dockerClient.InspectContainer(containerId)
+								if err != nil {
+									return
+								}
+								e.containers[containerId] = container
+							}
+
+							name := container.Name[1:] // Strip the leading slas
+							if e.nameFromEnv != "" {
+								fields := docker.GetEnvVars(container, append(e.fieldsFromEnv, e.nameFromEnv))
+								if alt_name, ok := fields[e.nameFromEnv]; ok && alt_name != "" {
+									name = alt_name
+								}
+							}
+
+							writeStringField(firstfield, &buf, "ContainerID", containerId)
+							writeStringField(firstfield, &buf, "ContainerName", name)
+							writeStringField(firstfield, &buf, "ContainerImage", container.Config.Image)
+
+							// NOTE! Anything that is a duplicate key will be overridden with the value
+							// that is in the label, not the environment
+							for _, key := range e.fieldsFromLabels {
+								if value, ok := container.Config.Labels[key]; ok {
+									writeStringField(firstfield, &buf, key, value)
+								}
+							}
+						}
+					}
 					firstfield = false
 				}
 			}
@@ -601,5 +840,8 @@ func init() {
 	})
 	RegisterPlugin("ESLogstashV0Encoder", func() interface{} {
 		return new(ESLogstashV0Encoder)
+	})
+	RegisterPlugin("ESLogstashDockerEncoder", func() interface{} {
+		return new(ESLogstashDockerEncoder)
 	})
 }

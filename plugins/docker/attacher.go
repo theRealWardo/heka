@@ -37,7 +37,6 @@ import (
 	"github.com/pborman/uuid"
 )
 
-
 type AttachManager struct {
 	hostname                string
 	client                  DockerClient
@@ -58,7 +57,7 @@ func NewAttachManager(endpoint string, certPath string, nameFromEnv string,
 	sincePath string, sinceInterval time.Duration, containerExpiryDays int,
 	newContainersReplayLogs bool) (*AttachManager, error) {
 
-	client, err := newDockerClient(certPath, endpoint)
+	client, err := NewDockerClient(certPath, endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +73,7 @@ func NewAttachManager(endpoint string, certPath string, nameFromEnv string,
 		nameFromEnv:             nameFromEnv,
 		fieldsFromEnv:           fieldsFromEnv,
 		fieldsFromLabels:        fieldsFromLabels,
-		sinces:			 sinceTracker,
+		sinces:                  sinceTracker,
 		newContainersReplayLogs: newContainersReplayLogs,
 	}
 
@@ -137,7 +136,6 @@ func (m *AttachManager) Run(ir InputRunner, hostname string, stopChan chan error
 	m.sinces.Write(time.Now())
 	return nil
 }
-
 
 // Periodically writes out a new since file, until stopped.
 func (m *AttachManager) sinceWriteLoop(stopChan chan error) {

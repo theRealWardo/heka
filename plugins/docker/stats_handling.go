@@ -81,7 +81,7 @@ func NewStatsManager(endpoint, certPath string, attachErrors chan<- error, nameF
 	var err error
 
 	//Get a new DockerClient from attacher
-	client, err = newDockerClient(certPath, endpoint)
+	client, err = NewDockerClient(certPath, endpoint)
 
 	if err != nil {
 		return nil, err
@@ -325,7 +325,7 @@ func NewStatsPump(statsChan chan *docker.Stats, name string, fields map[string]s
 	pump := func(sourceChan chan *docker.Stats, fields map[string]string) {
 		for {
 			source, ok := <-sourceChan
-			if !ok{
+			if !ok {
 				return
 			}
 			json_ver, _ := json.Marshal(source)
